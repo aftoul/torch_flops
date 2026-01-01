@@ -1,6 +1,6 @@
 from torch import nn, Tensor, Size
 from torch.types import Number
-from typing import Union
+from typing import Optional, Union
 
 __all__ = ['MODULE_FLOPs_MAPPING', 'FUNCTION_FLOPs_MAPPING', 'METHOD_FLOPs_MAPPING']
 
@@ -13,25 +13,14 @@ def flops_elemwise(result_shape: Size) -> int:
     return result_shape.numel()
 
 
-def flops_matmul(tensor1_shape: Size, tensor2_shape: Size, result_shape: Size) -> int:
-    # 可根据输入维度改为分情况处理，参考https://github.com/zhijian-liu/torchprofile/blob/6d80fe57bb8c6bc9f789da7925fac6547fa9502b/torchprofile/handlers.py#L35
-    def get_reduce_dim_shape(_s: Size, is_first_mat: bool):
-        return _s[0] if len(_s) == 1 else _s[-1 if is_first_mat else -2]
-
-    reduce_dim_shape = get_reduce_dim_shape(tensor1_shape, True)
-    assert reduce_dim_shape == get_reduce_dim_shape(tensor2_shape, False)
-    return (2 * reduce_dim_shape - 1) * result_shape.numel()
+def flops_matmul(tensor1, tensor2) -> int:
+    assert tensor1.shape[-1] == tensor2.shape[-2 if len(tensor2.shape) > 1 else 0]
+    return 2 * tensor1.numel() * int((tensor2 != 0.).sum().item()) // tensor1.shape[-1]
 
 # For nn.modules.*
 def flops_convnd(module: nn.modules.conv._ConvNd, input_shape: Size, result_shape: Size) -> int:
-    kernel_size = Size([__k]) if isinstance(__k := module.kernel_size, int) else Size(__k)
-    window_flops_per_chan = 2 * kernel_size.numel() - 1
-    effective_in_chan = module.in_channels // module.groups
-    window_flops = effective_in_chan * window_flops_per_chan + (effective_in_chan - 1)
-    conv_flops = result_shape.numel() * window_flops
-    bias_flops = result_shape.numel() if module.bias is not None else 0
-    return conv_flops + bias_flops
-    # return (2 * kernel_size.numel() * module.in_channels // module.groups - int(module.bias is None)) * result_shape.numel()
+    conv_elements = int((module.weight != 0).sum().item())
+    return 2 * conv_elements * (result_shape.numel()//module.out_channels) - int(module.bias is None) * module.groups * result_shape.numel()
 
 
 def flops_avgpoolnd(module: nn.modules.pooling._AvgPoolNd, input_shape: Size, result_shape: Size) -> int:
@@ -60,9 +49,9 @@ def flops_adaptive_maxpoolnd(module: nn.modules.pooling._AdaptiveMaxPoolNd, inpu
     return (kernel_size.numel() - 1) * result_shape.numel()
 
 
-def flops_functional_convnd(bias: int, groups: int, kernel_size: Size, in_channels: int, result_shape: Size) -> int:
-    total_flops = (2 * kernel_size.numel() * in_channels - int(bias is None) * groups) * result_shape.numel()
-    return total_flops
+def flops_functional_convnd(bias: Optional[Tensor], groups: int, in_channels: int, out_channels: int, weight: Tensor, result_shape: Size) -> int:
+    conv_elements = int((weight != 0).sum().item())
+    return 2 * conv_elements * (result_shape.numel()//out_channels) - int(bias is None) * groups * result_shape.numel()
 
 
 # For ModuleFLOPs
@@ -92,15 +81,9 @@ def ModuleFLOPs_Linear(module: nn.Linear, result: Tensor, *args, **kwargs) -> in
     assert isinstance(args[0], Tensor)
     assert isinstance(result, Tensor)
 
-    input_shape = args[0].shape  # [..., d_in]
-    weight_shape = module.weight.T.shape  # [d_out, d_in].T -> [d_in, d_out]
     result_shape = result.shape
 
-    assert input_shape[-1] == weight_shape[0], f"{input_shape}, {weight_shape}"
-    matmul_shape = Size(list(input_shape[:-1]) + list(weight_shape[-1:]))
-    assert matmul_shape == result_shape
-
-    total_flops = flops_matmul(input_shape, weight_shape, result_shape)
+    total_flops = flops_matmul(args[0], module.weight.T)
     if module.bias is not None:
         total_flops += flops_elemwise(result_shape)
 
@@ -225,7 +208,7 @@ def FunctionFLOPs_matmul(result: Tensor, *args, **kwargs) -> int:
     tensor_A, tensor_B = args
     assert isinstance(tensor_A, Tensor) and isinstance(tensor_B, Tensor)
 
-    total_flops = flops_matmul(tensor_A.shape, tensor_B.shape, result.shape)
+    total_flops = flops_matmul(tensor_A, tensor_B)
     return total_flops
 
 
@@ -242,7 +225,7 @@ def FunctionFLOPs_linear(result: Tensor, *args, **kwargs) -> int:
 
     assert isinstance(input, Tensor) and isinstance(weight, Tensor)
 
-    total_flops = flops_matmul(input.shape, weight.T.shape, result.shape)
+    total_flops = flops_matmul(input, weight.T)
     if bias is not None:
         total_flops += flops_elemwise(result.shape)
     return total_flops 
@@ -259,8 +242,8 @@ def FunctionFLOPs_convnd(result: Tensor, *args, **kwargs) -> int:
     assert isinstance(input, Tensor)
     assert isinstance(weight, Tensor)
 
-    kernel_size = weight.shape[2:]
     in_channels = weight.shape[1]
+    out_channels = weight.shape[0]
     bias = kwargs.get('bias')
     groups = kwargs.get('groups', None)
     if groups is None:
@@ -273,7 +256,7 @@ def FunctionFLOPs_convnd(result: Tensor, *args, **kwargs) -> int:
         padding = 0
     result_shape = result.shape
 
-    return flops_functional_convnd(bias, groups, kernel_size, in_channels, result_shape)
+    return flops_functional_convnd(bias, groups, in_channels, out_channels, weight, result_shape)
 
 def FunctionFLOPs_leaky_relu(result: Tensor, *args, **kwargs) -> int:
     return result.numel() * 4

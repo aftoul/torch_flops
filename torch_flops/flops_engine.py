@@ -372,7 +372,7 @@ class ShapeProp(torch.fx.Interpreter):
 
 
 class TorchFLOPsByFX():
-    def __init__(self, model: nn.Module, mem_func_name: Literal['memory_allocated', 'max_memory_allocated'] = 'max_memory_allocated', ignore_ops: Sequence[str] = []):
+    def __init__(self, model: nn.Module, argnames: Optional[List[str]]=None, mem_func_name: Literal['memory_allocated', 'max_memory_allocated'] = 'max_memory_allocated', ignore_ops: Sequence[str] = []):
         '''
         model: the model.
         mem_func_name: which function to measure the GPU memory; choosed from 'memory_allocated' and 'max_memory_allocated'; default: 'max_memory_allocated'.
@@ -380,7 +380,7 @@ class TorchFLOPsByFX():
         '''
         model.eval()
         try:
-            self.graph_model: GraphModule = symbolic_trace(model)
+            self.graph_model: GraphModule = symbolic_trace(model, argnames)
         except torch.fx.proxy.TraceError as e:
             print("\033[33mNOTE: The model cannot be built as a graph model by 'symbolic_trace()'. Please remove the `assert`, `if` and `for` operations. " +
                   "See 'https://pytorch.org/docs/stable/fx.html#limitations-of-symbolic-tracing' for more instructions.\033[0m")
